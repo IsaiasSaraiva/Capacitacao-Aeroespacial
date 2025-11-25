@@ -1,6 +1,10 @@
 # ==========================================
-# SCRIPT RETINANET COM DETECTRON2
+# RETINANET 
 # ==========================================
+# O RetinaNet é um modelo de detecção de objetos baseado em uma única rede.
+# Ele usa a Loss Focal para lidar melhor com o desequilíbrio entre classes,
+# o que ajuda a melhorar a precisão em objetos menores ou menos frequentes.
+
 
 import os
 import shutil
