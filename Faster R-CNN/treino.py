@@ -1,242 +1,422 @@
 # ==========================================
-# SCRIPT CONSOLIDADO - RT-DETR-X (GPU 6–8 GB)
+# FASTER R-CNN OTIMIZADO - TARGET 85% PRECISION
 # ==========================================
 
 import os
 import shutil
+import json
+import cv2
 import matplotlib.pyplot as plt
 import pandas as pd
 from roboflow import Roboflow
-from ultralytics import RTDETR
 import torch
+from detectron2 import model_zoo
+from detectron2.config import get_cfg
+from detectron2.engine import DefaultTrainer
+from detectron2.data import DatasetCatalog, MetadataCatalog
+from detectron2.structures import BoxMode
+from detectron2.utils.visualizer import Visualizer
+from detectron2.evaluation import COCOEvaluator, inference_on_dataset
+from detectron2.data import build_detection_test_loader, build_detection_train_loader
+from detectron2.data import transforms as T
+from detectron2.data import detection_utils as utils
 
-# 🔧 Otimização para evitar CUDA OOM
+# 🔧 Evitar OOM
 torch.cuda.empty_cache()
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # -----------------------------
-# 1. CONFIGURAÇÕES INICIAIS
+# CONFIGS
 # -----------------------------
 API_KEY = "6yKQfUumfFPyQzjUodnU"
 WORKSPACE = "college-jcb9y"
 PROJECT_NAME = "aircraft-damage-detection-a8z4k"
 VERSION = 1
-FORMAT = "yolov8"
-RUN_NAME = "rtdetr_X_aircraft_damage_140ep"  # ✅ Atualizado para X
+FORMAT = "coco"
+RUN_NAME = "faster_rcnn_aircraft_optimized_85"
+OUTPUT_DIR = f"./output/{RUN_NAME}"
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # -----------------------------
-# 2. DOWNLOAD DO DATASET
+# BAIXAR DATASET
 # -----------------------------
-print(f"\n🚀 Iniciando download do dataset '{PROJECT_NAME}' via Roboflow...")
+print(f"\n🚀 Baixando dataset {PROJECT_NAME} no formato COCO...")
 
-try:
-    rf = Roboflow(api_key=API_KEY)
-    project = rf.workspace(WORKSPACE).project(PROJECT_NAME)
-    dataset = project.version(VERSION).download(FORMAT)
-    dataset_path = dataset.location
-    print(f"✅ Dataset baixado em: {dataset_path}")
-except Exception as e:
-    print(f"❌ Erro ao baixar o dataset: {e}")
-    exit(1)
+rf = Roboflow(api_key=API_KEY)
+project = rf.workspace(WORKSPACE).project(PROJECT_NAME)
+dataset = project.version(VERSION).download(FORMAT)
+dataset_path = dataset.location
+
+print(f"✅ Dataset baixado em: {dataset_path}")
 
 # -----------------------------
-# 3. CORREÇÃO DE RÓTULOS (classe 1 → 0)
+# DATA AUGMENTATION MODERADO E ESTÁVEL
 # -----------------------------
-print("\n🔧 Corrigindo rótulos (classe 1 → 0)...")
-count_corrections = 0
-label_dirs = [
-    os.path.join(dataset_path, 'train/labels'),
-    os.path.join(dataset_path, 'valid/labels'),
-    os.path.join(dataset_path, 'test/labels')
-]
-
-for label_dir in label_dirs:
-    if os.path.exists(label_dir):
-        for filename in os.listdir(label_dir):
-            if filename.endswith(".txt"):
-                file_path = os.path.join(label_dir, filename)
-                with open(file_path, "r") as f:
-                    lines = f.readlines()
-
-                new_lines = []
-                needs_rewrite = False
-                for line in lines:
-                    if line.strip().startswith("1 "):
-                        new_lines.append("0" + line.strip()[1:] + "\n")
-                        count_corrections += 1
-                        needs_rewrite = True
-                    else:
-                        new_lines.append(line)
-
-                if needs_rewrite:
-                    with open(file_path, "w") as f:
-                        f.writelines(new_lines)
-
-print(f"✅ Correção concluída — {count_corrections} ocorrências alteradas.")
-
-# -----------------------------
-# 4. ARQUIVO YAML
-# -----------------------------
-dataset_yaml = f"""
-path: {dataset_path}
-train: train/images
-val: valid/images
-test: test/images
-nc: 1
-names: ["damage"]
-"""
-yaml_file = os.path.join(dataset_path, "aircraft_dataset.yaml")
-with open(yaml_file, "w") as f:
-    f.write(dataset_yaml)
-print(f"✅ YAML criado em: {yaml_file}")
+class CustomMapper:
+    """Mapper com data augmentation moderado para estabilidade"""
+    def __init__(self, cfg, is_train=True):
+        self.is_train = is_train
+        self.augmentations = [
+            T.ResizeShortestEdge(
+                short_edge_length=(640, 672, 704, 736, 768, 800),
+                max_size=1333,
+                sample_style="choice"
+            ),
+            T.RandomFlip(prob=0.5, horizontal=True, vertical=False),
+            T.RandomBrightness(0.9, 1.1),
+            T.RandomContrast(0.9, 1.1),
+        ]
+        
+    def __call__(self, dataset_dict):
+        dataset_dict = dataset_dict.copy()
+        image = utils.read_image(dataset_dict["file_name"], format="BGR")
+        
+        if self.is_train:
+            aug_input = T.AugInput(image)
+            transforms = T.AugmentationList(self.augmentations)(aug_input)
+            image = aug_input.image
+            
+            annos = [
+                utils.transform_instance_annotations(obj, transforms, image.shape[:2])
+                for obj in dataset_dict.pop("annotations")
+            ]
+            dataset_dict["image"] = torch.as_tensor(image.transpose(2, 0, 1).astype("float32"))
+            dataset_dict["instances"] = utils.annotations_to_instances(annos, image.shape[:2])
+        else:
+            dataset_dict["image"] = torch.as_tensor(image.transpose(2, 0, 1).astype("float32"))
+            
+        return dataset_dict
 
 # -----------------------------
-# 5. TREINAMENTO — RT-DETR-X
+# CONVERTER DATASET PARA DETECTRON2
 # -----------------------------
-print("\n⬇️ Carregando RT-DETR-X pretrained (Ultralytics)...")
-# ✅ Modelo mais leve - ideal para 6-8GB VRAM
-model = RTDETR("rtdetr-x.pt")
+def get_aircraft_dicts(img_dir, ann_file):
+    """Converte anotações COCO para formato Detectron2"""
+    with open(ann_file) as f:
+        coco_data = json.load(f)
+    
+    imgs = {img['id']: img for img in coco_data['images']}
+    
+    img_anns = {}
+    for ann in coco_data['annotations']:
+        img_id = ann['image_id']
+        if img_id not in img_anns:
+            img_anns[img_id] = []
+        img_anns[img_id].append(ann)
+    
+    dataset_dicts = []
+    for img_id, img_info in imgs.items():
+        filename = os.path.join(img_dir, img_info['file_name'])
+        if not os.path.exists(filename):
+            continue
+        
+        record = {
+            "file_name": filename,
+            "image_id": img_id,
+            "height": img_info['height'],
+            "width": img_info['width'],
+            "annotations": []
+        }
+        
+        if img_id in img_anns:
+            for ann in img_anns[img_id]:
+                x, y, w, h = ann['bbox']
+                # Filtrar boxes muito pequenas (ruído)
+                if w < 10 or h < 10:
+                    continue
+                obj = {
+                    "bbox": [x, y, x + w, y + h],
+                    "bbox_mode": BoxMode.XYXY_ABS,
+                    "category_id": 0,
+                }
+                record["annotations"].append(obj)
+        
+        # Só adicionar imagens com pelo menos 1 anotação válida
+        if len(record["annotations"]) > 0:
+            dataset_dicts.append(record)
+    
+    return dataset_dicts
 
-print(f"\n🏋️ Iniciando treinamento RT-DETR (X) por 140 épocas...\n")
+# Registrar datasets
+for split in ["train", "valid", "test"]:
+    dataset_name = f"aircraft_{split}"
+    img_dir = os.path.join(dataset_path, split)
+    ann_file = os.path.join(dataset_path, split, "_annotations.coco.json")
+    
+    if os.path.exists(ann_file):
+        DatasetCatalog.register(
+            dataset_name, 
+            lambda d=img_dir, a=ann_file: get_aircraft_dicts(d, a)
+        )
+        MetadataCatalog.get(dataset_name).set(thing_classes=["damage"])
+        print(f"✅ Registrado: {dataset_name}")
 
-model.train(
-    data=yaml_file,
-    epochs=150,
-    batch=2,
-    imgsz=640,
-    name=RUN_NAME,
-    device=0,
+# -----------------------------
+# CONFIGURAR FASTER R-CNN OTIMIZADO
+# -----------------------------
+print("\n⚙️ Configurando Faster R-CNN com hiperparâmetros otimizados...")
 
-    lr0=0.00005,
-    lrf=0.01,
+cfg = get_cfg()
+# Usar ResNet-101 (mais profundo) ao invés de ResNet-50
+cfg.merge_from_file(model_zoo.get_config_file("COCO-Detection/faster_rcnn_R_101_FPN_3x.yaml"))
+cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-Detection/faster_rcnn_R_101_FPN_3x.yaml")
 
-    patience=50,
+# Datasets
+cfg.DATASETS.TRAIN = ("aircraft_train",)
+cfg.DATASETS.TEST = ("aircraft_valid",)
 
-    mosaic=0.1,
-    mixup=0.0,
-    flipud=0.0,
-    fliplr=0.3,
+# Hiperparâmetros otimizados e estáveis
+cfg.DATALOADER.NUM_WORKERS = 4
+cfg.SOLVER.IMS_PER_BATCH = 4
+cfg.SOLVER.BASE_LR = 0.0003  # LR mais baixo para estabilidade
+cfg.SOLVER.MAX_ITER = 18000
+cfg.SOLVER.STEPS = (12000, 16000)
+cfg.SOLVER.GAMMA = 0.1
+cfg.SOLVER.WARMUP_ITERS = 1000
+cfg.SOLVER.WARMUP_FACTOR = 0.001
+cfg.SOLVER.WARMUP_METHOD = "linear"
 
-    hsv_h=0.005,
-    hsv_s=0.2,
-    hsv_v=0.2,
+# Input - maior resolução para detalhes
+cfg.INPUT.MIN_SIZE_TRAIN = (640, 672, 704, 736, 768, 800)
+cfg.INPUT.MAX_SIZE_TRAIN = 1333
+cfg.INPUT.MIN_SIZE_TEST = 800
+cfg.INPUT.MAX_SIZE_TEST = 1333
 
-    amp=False,
-    workers=2,
-    cache=False
+# RPN (Region Proposal Network) - configurações estáveis
+cfg.MODEL.RPN.BATCH_SIZE_PER_IMAGE = 256
+cfg.MODEL.RPN.POSITIVE_FRACTION = 0.5
+cfg.MODEL.RPN.PRE_NMS_TOPK_TRAIN = 2000
+cfg.MODEL.RPN.POST_NMS_TOPK_TRAIN = 1000
+cfg.MODEL.RPN.PRE_NMS_TOPK_TEST = 1000
+cfg.MODEL.RPN.POST_NMS_TOPK_TEST = 1000
+cfg.MODEL.RPN.NMS_THRESH = 0.7
+cfg.MODEL.RPN.IOU_THRESHOLDS = [0.3, 0.7]  # Limites de IoU estáveis
+cfg.MODEL.RPN.IOU_LABELS = [0, -1, 1]
+cfg.MODEL.RPN.SMOOTH_L1_BETA = 0.1  # Suavizar loss de localização
+
+# ROI Heads - configurações aprimoradas e estáveis
+cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 256
+cfg.MODEL.ROI_HEADS.POSITIVE_FRACTION = 0.5
+cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1
+cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.65  # Threshold inicial moderado
+cfg.MODEL.ROI_HEADS.NMS_THRESH_TEST = 0.5
+cfg.MODEL.ROI_BOX_HEAD.SMOOTH_L1_BETA = 1.0  # Beta padrão para estabilidade
+
+# Box Predictor
+cfg.MODEL.ROI_BOX_HEAD.POOLER_RESOLUTION = 7
+cfg.MODEL.ROI_BOX_HEAD.NUM_FC = 2
+
+# Anchor Generator - múltiplas escalas
+cfg.MODEL.ANCHOR_GENERATOR.SIZES = [[32], [64], [128], [256], [512]]
+cfg.MODEL.ANCHOR_GENERATOR.ASPECT_RATIOS = [[0.5, 1.0, 2.0]]
+
+# Regularização com gradient clipping mais agressivo
+cfg.MODEL.BACKBONE.FREEZE_AT = 2
+cfg.SOLVER.WEIGHT_DECAY = 0.0001
+cfg.SOLVER.CLIP_GRADIENTS.ENABLED = True
+cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE = "norm"
+cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE = 0.5  # Mais agressivo para evitar NaN
+cfg.SOLVER.CLIP_GRADIENTS.NORM_TYPE = 2.0
+
+# Output
+cfg.OUTPUT_DIR = OUTPUT_DIR
+cfg.SOLVER.CHECKPOINT_PERIOD = 2000
+cfg.TEST.EVAL_PERIOD = 1000
+
+print("✅ Configuração otimizada e estável pronta!")
+print(f"   - Backbone: ResNet-101-FPN")
+print(f"   - Score Threshold: {cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST}")
+print(f"   - Learning Rate: {cfg.SOLVER.BASE_LR}")
+print(f"   - Max Iterations: {cfg.SOLVER.MAX_ITER}")
+print(f"   - Gradient Clipping: {cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE}")
+print(f"   - RPN Smooth L1 Beta: 0.1 (estabilidade)")
+
+# -----------------------------
+# TRAINER CUSTOMIZADO
+# -----------------------------
+class CustomTrainer(DefaultTrainer):
+    @classmethod
+    def build_train_loader(cls, cfg):
+        return build_detection_train_loader(
+            cfg, 
+            mapper=CustomMapper(cfg, is_train=True)
+        )
+
+# -----------------------------
+# TREINAMENTO
+# -----------------------------
+print("\n🏋️ Iniciando treinamento otimizado...\n")
+
+trainer = CustomTrainer(cfg)
+trainer.resume_or_load(resume=False)
+trainer.train()
+
+print("\n✅ Treinamento concluído!")
+
+# -----------------------------
+# AVALIAÇÃO COM MÚLTIPLOS THRESHOLDS
+# -----------------------------
+print("\n📊 Avaliando modelo com diferentes thresholds...")
+
+cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
+
+from detectron2.engine import DefaultPredictor
+
+# Testar múltiplos thresholds para encontrar o melhor
+thresholds = [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9]
+best_f1 = 0
+best_threshold = 0.7
+best_metrics = {}
+
+val_dataset = get_aircraft_dicts(
+    os.path.join(dataset_path, "valid"),
+    os.path.join(dataset_path, "valid", "_annotations.coco.json")
 )
 
+def calculate_iou(box1, box2):
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = area1 + area2 - intersection
+    
+    return intersection / union if union > 0 else 0
 
+print("\n🔍 Testando thresholds de confiança:")
+print("-" * 70)
+
+for thresh in thresholds:
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = thresh
+    predictor = DefaultPredictor(cfg)
+    
+    TP = FP = FN = 0
+    iou_threshold = 0.5
+    
+    for d in val_dataset:
+        img = cv2.imread(d["file_name"])
+        outputs = predictor(img)
+        
+        pred_boxes = outputs["instances"].pred_boxes.tensor.cpu().numpy()
+        pred_scores = outputs["instances"].scores.cpu().numpy()
+        pred_boxes = pred_boxes[pred_scores >= thresh]
+        
+        gt_boxes = [ann["bbox"] for ann in d["annotations"]]
+        matched_gt = set()
+        
+        for pred_box in pred_boxes:
+            best_iou = 0
+            best_gt_idx = -1
+            
+            for i, gt_box in enumerate(gt_boxes):
+                if i in matched_gt:
+                    continue
+                iou = calculate_iou(pred_box, gt_box)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_gt_idx = i
+            
+            if best_iou >= iou_threshold:
+                TP += 1
+                matched_gt.add(best_gt_idx)
+            else:
+                FP += 1
+        
+        FN += len(gt_boxes) - len(matched_gt)
+    
+    precision = TP / (TP + FP) if (TP + FP) > 0 else 0
+    recall = TP / (TP + FN) if (TP + FN) > 0 else 0
+    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    
+    print(f"Threshold {thresh:.2f} → P: {precision:.4f} | R: {recall:.4f} | F1: {f1_score:.4f}")
+    
+    if f1_score > best_f1:
+        best_f1 = f1_score
+        best_threshold = thresh
+        best_metrics = {
+            "precision": precision,
+            "recall": recall,
+            "f1_score": f1_score,
+            "TP": TP,
+            "FP": FP,
+            "FN": FN,
+            "threshold": thresh
+        }
+
+print("-" * 70)
+print(f"\n🎯 MELHOR CONFIGURAÇÃO:")
+print(f"   Threshold: {best_threshold}")
+print(f"   Precision: {best_metrics['precision']:.4f}")
+print(f"   Recall:    {best_metrics['recall']:.4f}")
+print(f"   F1-Score:  {best_metrics['f1_score']:.4f}")
+
+# Salvar métricas
+results = {
+    "best_threshold": best_threshold,
+    "best_metrics": best_metrics,
+    "all_thresholds": {}
+}
+
+# Avaliação COCO com melhor threshold
+cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = best_threshold
+predictor = DefaultPredictor(cfg)
+
+evaluator = COCOEvaluator("aircraft_valid", cfg, False, output_dir=OUTPUT_DIR)
+val_loader = build_detection_test_loader(cfg, "aircraft_valid")
+coco_results = inference_on_dataset(predictor.model, val_loader, evaluator)
+
+results["coco_metrics"] = coco_results
+
+with open(os.path.join(OUTPUT_DIR, "metrics.json"), "w") as f:
+    json.dump(results, f, indent=2)
+
+print("\n✅ Métricas salvas em metrics.json")
 
 # -----------------------------
-# 6. GRÁFICOS
+# VISUALIZAÇÃO
 # -----------------------------
-print("\n📊 Gerando gráficos de métricas...")
+print("\n🖼️ Gerando visualizações...")
 
-runs_dir = os.path.join("runs", "detect", RUN_NAME)
-csv_path = os.path.join(runs_dir, "results.csv")
+test_dataset = get_aircraft_dicts(
+    os.path.join(dataset_path, "test"),
+    os.path.join(dataset_path, "test", "_annotations.coco.json")
+)
 
-if os.path.exists(csv_path):
-    df = pd.read_csv(csv_path)
-    df.columns = df.columns.str.strip()
+aircraft_metadata = MetadataCatalog.get("aircraft_test")
 
-    print("📌 Colunas encontradas no CSV:", list(df.columns))
+for i, d in enumerate(test_dataset[:10]):
+    img = cv2.imread(d["file_name"])
+    outputs = predictor(img)
+    
+    v = Visualizer(img[:, :, ::-1], metadata=aircraft_metadata, scale=1.0)
+    out = v.draw_instance_predictions(outputs["instances"].to("cpu"))
+    result_img = out.get_image()[:, :, ::-1]
+    
+    output_path = os.path.join(OUTPUT_DIR, f"prediction_{i}.jpg")
+    cv2.imwrite(output_path, result_img)
 
-    # ===========================
-    # Ajuste de nomes possíveis
-    # ===========================
-    col_precision = "precision(B)" if "precision(B)" in df.columns else "metrics/precision"
-    col_map50 = "metrics/mAP50(B)" if "metrics/mAP50(B)" in df.columns else "metrics/mAP50"
-    col_recall = "recall(B)" if "recall(B)" in df.columns else "metrics/recall"
-
-    col_box_loss = "train/box_loss" if "train/box_loss" in df.columns else "train/loss"
-    col_cls_loss = "train/cls_loss" if "train/cls_loss" in df.columns else None
-
-    # ---------------------------
-    # GRÁFICO 1 — Precision & mAP50
-    # ---------------------------
-    plt.figure(figsize=(10, 6))
-
-    if col_precision in df:
-        plt.plot(df["epoch"], df[col_precision], label="Precision (Val)")
-
-    if col_map50 in df:
-        plt.plot(df["epoch"], df[col_map50], label="mAP50 (Val)")
-
-    plt.xlabel("Épocas")
-    plt.ylabel("Métricas de Validação")
-    plt.title("Precision e mAP50 (RT-DETR-X)")
-    plt.legend()
-    plt.grid(True)
-
-    graph_path = os.path.join(runs_dir, "precision_map50.png")
-    plt.savefig(graph_path)
-    plt.close()
-    print(f"✅ Gráfico salvo: {graph_path}")
-
-    # ---------------------------
-    # GRÁFICO 2 — Loss & Recall
-    # ---------------------------
-    plt.figure(figsize=(10, 6))
-
-    if col_box_loss in df:
-        plt.plot(df["epoch"], df[col_box_loss], label="Box Loss")
-
-    if col_cls_loss and col_cls_loss in df:
-        plt.plot(df["epoch"], df[col_cls_loss], label="Class Loss")
-
-    if col_recall in df:
-        plt.plot(df["epoch"], df[col_recall], label="Recall (Val)")
-
-    plt.xlabel("Épocas")
-    plt.ylabel("Valores")
-    plt.title("Loss e Recall (RT-DETR-X)")
-    plt.legend()
-    plt.grid(True)
-
-    loss_graph_path = os.path.join(runs_dir, "loss_recall.png")
-    plt.savefig(loss_graph_path)
-    plt.close()
-    print(f"✅ Gráfico salvo: {loss_graph_path}")
-
-else:
-    print("⚠️ CSV não encontrado.")
+print(f"✅ {len(test_dataset[:10])} imagens salvas")
 
 # -----------------------------
-# 7. EXPORTAÇÃO
+# RELATÓRIO FINAL
 # -----------------------------
+print("\n" + "="*70)
+print("📊 RELATÓRIO FINAL")
+print("="*70)
+print(f"Modelo: Faster R-CNN ResNet-101-FPN")
+print(f"Threshold ótimo: {best_threshold}")
+print(f"Precision: {best_metrics['precision']:.2%}")
+print(f"Recall: {best_metrics['recall']:.2%}")
+print(f"F1-Score: {best_metrics['f1_score']:.2%}")
+print(f"\nResultados em: {OUTPUT_DIR}")
+print("="*70)
+
+# ZIP
 zip_name = f"{RUN_NAME}_results"
-print("\n📦 Compactando resultados...")
-shutil.make_archive(zip_name, 'zip', os.path.join("runs", "detect"), RUN_NAME)
-print(f"✅ ZIP criado: {zip_name}.zip")
-
-# -----------------------------
-# 8. PREDIÇÃO FINAL
-# -----------------------------
-print("\n🔍 Realizando predição de teste...")
-
-test_dir = os.path.join(dataset_path, "test/images")
-test_image = os.path.join(test_dir, os.listdir(test_dir)[0])
-
-save_dir = os.path.join("runs", "detect", RUN_NAME, "test_prediction")
-os.makedirs(save_dir, exist_ok=True)
-
-model.predict(
-    source=test_image,
-    save=True,
-    project=os.path.join("runs", "detect", RUN_NAME),
-    name="test_prediction"
-)
-
-print(f"✅ Predição salva em: {save_dir}")
-
-# -----------------------------
-# 9. RESUMO FINAL
-# -----------------------------
-print("\n" + "="*50)
-print("🎯 TREINAMENTO CONCLUÍDO - RT-DETR-X")
-print("="*50)
-print(f"📁 Resultados: runs/detect/{RUN_NAME}")
-print(f"📦 ZIP: {zip_name}.zip")
-print(f"🔍 Predição teste: {save_dir}")
-print("="*50)
+shutil.make_archive(zip_name, 'zip', OUTPUT_DIR)
+print(f"\n📦 ZIP criado: {zip_name}.zip")
+print("\n🎉 Pipeline concluído!")
