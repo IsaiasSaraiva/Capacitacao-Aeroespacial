@@ -1,6 +1,22 @@
 # ==========================================
-# SCRIPT CONSOLIDADO - YOLOv8s (2 ETAPAS) HYBRID BEAST MODE
+# YOLOv8s (2 ETAPAS) HYBRID BEAST MODE
 # ==========================================
+# Este script organiza um fluxo de treinamento em duas fases para o YOLOv8s,
+# combinando congelamento parcial do backbone na primeira etapa e um 
+# fine-tuning completo na segunda. A ideia é aproveitar a estabilidade
+# inicial do modelo pré-treinado e depois liberar todos os parâmetros
+# para refinar o aprendizado de forma mais agressiva.
+#
+# Esse método híbrido costuma gerar resultados mais consistentes em bases
+# pequenas e com apenas uma classe, como é o caso da detecção de danos
+# em fuselagens. O script também realiza correções automáticas nos rótulos,
+# cria o arquivo YAML, gera predições de teste, produz gráficos das métricas
+# e compacta todos os resultados ao final.
+#
+# O objetivo aqui é colocar o YOLOv8s no modo “beast”, explorando fortes
+# augmentations, duas etapas de ajuste e o otimizador AdamW para extrair
+# o máximo do modelo.
+
 
 import os
 import shutil
