@@ -6,6 +6,34 @@
 # É mais rápido que as versões anteriores da família R-CNN e costuma ter
 # boa precisão em tarefas de detecção.
 
+# ==========================================
+# FASTER R-CNN (pipeline)
+# ==========================================
+# Script completo: prepara dados, treina e avalia um Faster R-CNN.
+#
+# PASSO A PASSO (resumido):
+# 1) Configura parâmetros e cria pasta de saída.
+# 2) Baixa o dataset do Roboflow no formato COCO.
+# 3) Define um mapper com augmentations moderados para treino.
+# 4) Converte as anotações COCO para o formato esperado pelo Detectron2,
+#    filtrando boxes muito pequenas e mantendo apenas imagens com anotações válidas.
+# 5) Registra os datasets (train, valid, test) no DatasetCatalog/MetadataCatalog.
+# 6) Carrega uma configuração pré-treinada do model zoo (ResNet-101-FPN)
+#    e ajusta hiperparâmetros para estabilidade e desempenho.
+# 7) Define um trainer customizado para usar o mapper com augmentations.
+# 8) Executa o treinamento e salva checkpoints na pasta de saída.
+# 9) Após treinar, testa vários thresholds de confiança para encontrar
+#    o melhor balanço (precision/recall) medido por F1.
+# 10) Reexecuta avaliação final com o melhor threshold e registra métricas COCO.
+# 11) Gera visualizações: desenha predições em algumas imagens de teste.
+# 12) Salva um relatório resumido (precision, recall, F1) e compacta os resultados.
+#
+# Observações rápidas:
+# - O mapper aplica redimensionamento e flips leves para manter estabilidade.
+# - Filtramos caixas muito pequenas para reduzir ruído nas anotações.
+# - Usamos clipping de gradiente e learning rate baixo para evitar instabilidade.
+# - A etapa de avaliação testa múltiplos thresholds para escolher o ideal.
+
 
 import os
 import shutil
