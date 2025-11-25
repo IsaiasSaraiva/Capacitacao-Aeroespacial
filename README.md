@@ -27,3 +27,30 @@ O *dataset* original é rotulado para **Detecção de Objetos** (localização d
 | **DEFECTO** (Classe 1) | Imagens que possuem **anotações de defeitos** (presença de *bounding boxes*). | A imagem **contém** um defeito. |
 | **NORMAL** (Classe 0) | Imagens que **não possuem anotações** (imagens de fundo limpo). | A imagem está **sem falhas**. |
 
+## Organização do Repositório
+
+Este repositório está estruturado da seguinte forma:
+
+- **Faster R-CNN**: contém o código-fonte utilizado para o treinamento do modelo Faster R-CNN.
+- **RT-DETR**: inclui o arquivo `treino.py` e demais scripts necessários para o treinamento da arquitetura RT-DETR.
+- **RetinaNet**: pasta destinada ao código de treinamento do modelo RetinaNet.
+- **YOLO10s**: contém os arquivos referentes ao treinamento do modelo YOLOv10s.
+- **YOLO8n**: código-fonte para o treinamento do YOLOv8n.
+- **YOLO8s_V1 / YOLO8s_V2 / YOLO8s_V3**: versões alternativas de configuração e treinamento do modelo YOLOv8s.
+
+---
+
+## Como Executar
+
+Para utilizar qualquer um dos modelos:
+
+1. Clone este repositório:
+
+   ```bash
+   git clone <URL-do-repositório>
+   ```
+2. Crie um ambiente virtual.
+
+Instale as dependências listadas no arquivo requirements.txt:
+   ```bash
+    pip install -r requirements.txt
