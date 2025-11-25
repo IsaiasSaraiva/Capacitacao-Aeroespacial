@@ -5,6 +5,32 @@
 # Ele usa atenção para localizar os objetos direto na imagem, sem precisar de
 # propostas de regiões. Costuma ser rápido e eficiente para treinos e inferências.
 
+# ==========================================
+# RT-DETR-X (pipeline)
+# ==========================================
+# Script completo para baixar o dataset, ajustar rótulos, treinar,
+# gerar gráficos, exportar resultados e criar uma predição final.
+#
+# PASSO A PASSO (resumido):
+# 1) Carrega configurações básicas e define nome do experimento.
+# 2) Baixa o dataset pelo Roboflow no formato YOLO e prepara o diretório.
+# 3) Corrige rótulos que vieram com classe "1" e converte tudo para classe "0".
+# 4) Gera automaticamente o arquivo YAML do dataset.
+# 5) Carrega o modelo RT-DETR-X pré-treinado e inicia o treinamento
+#    ajustando LR, otimizador e augmentations mais leves (DETR não tolera
+#    distorções agressivas).
+# 6) Salva métricas e histórico na pasta "runs/detect/<RUN_NAME>".
+# 7) Lê o CSV de resultados e gera gráficos de loss, recall, precision e mAP50.
+# 8) Compacta toda a pasta do experimento em um arquivo ZIP.
+# 9) Realiza uma predição de teste e salva a imagem anotada.
+#
+# Observações rápidas:
+# - O RT-DETR-X usa atenção direta para localizar objetos, sem propostas.
+# - Ele é mais estável com LR baixo e augmentations suaves.
+# - Mosaic, shear e copy-paste fortes tendem a prejudicar a convergência.
+# - O script tenta adaptar automaticamente nomes de colunas do CSV.
+# - No final, gera gráficos, zip e uma predição para conferência visual.
+
 
 import os
 import shutil
