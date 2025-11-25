@@ -1,6 +1,11 @@
 # ==========================================
-# FASTER R-CNN OTIMIZADO - TARGET 85% PRECISION
+# FASTER R-CNN 
 # ==========================================
+# O Faster R-CNN é um modelo de detecção de objetos que usa uma rede para
+# gerar propostas de regiões e outra para classificar e ajustar as caixas.
+# É mais rápido que as versões anteriores da família R-CNN e costuma ter
+# boa precisão em tarefas de detecção.
+
 
 import os
 import shutil
