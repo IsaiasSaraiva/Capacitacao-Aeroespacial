@@ -1,6 +1,49 @@
 # ==========================================
-# SCRIPT CONSOLIDADO - YOLOv8n (100 ÉPOCAS)
+# YOLOv8n 
 # ==========================================
+# O YOLOv8n é a versão mais leve da família YOLOv8. Foi feito para rodar rápido,
+# com baixo consumo de GPU, mantendo boa precisão para tarefas gerais de detecção.
+
+# ------------------------------------------------
+# Script para treinar o modelo YOLO usando dataset
+# baixado do Roboflow, ajustar rótulos, criar YAML,
+# treinar, gerar gráficos e salvar uma predição teste.
+# ------------------------------------------------
+
+# 1. CONFIGURAÇÕES INICIAIS
+# Define chave da API, workspace, nome do projeto e
+# demais parâmetros para baixar o dataset e treinar.
+
+# 2. DOWNLOAD DO DATASET
+# Conecta ao Roboflow e baixa a versão escolhida
+# no formato YOLO. Salva o caminho local do dataset.
+
+# 3. CORREÇÃO DE RÓTULOS
+# Ajusta os arquivos de label, trocando a classe “1”
+# por “0” quando necessário. Faz a correção nos
+# diretórios de treino, validação e teste.
+
+# 4. CRIAÇÃO DO ARQUIVO YAML
+# Gera o arquivo .yaml com os caminhos do dataset
+# e informações de classes, usado pelo YOLO no treino.
+
+# 5. TREINAMENTO
+# Carrega o modelo YOLO e inicia o treinamento com
+# os hiperparâmetros definidos (épocas, batch, aug etc.).
+# Os resultados ficam salvos em runs/detect/NOME.
+
+# 6. GRÁFICOS DE MÉTRICAS
+# Lê o CSV gerado pelo YOLO e cria gráficos básicos
+# como precision, mAP50, losses e recall. Cada gráfico
+# é salvo dentro da pasta do experimento.
+
+# 7. EXPORTAÇÃO
+# Compacta toda a pasta do treinamento em um arquivo ZIP
+# para facilitar o armazenamento e compartilhamento.
+
+# 8. PREDIÇÃO DE TESTE
+# Seleciona uma imagem da pasta de teste, roda uma
+# predição rápida e salva a imagem com bounding boxes.
 
 import os
 import shutil
