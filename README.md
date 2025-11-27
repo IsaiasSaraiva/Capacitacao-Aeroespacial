@@ -12,7 +12,9 @@ O principal objetivo da Residência Tecnológica em Tecnologias Aeroespaciais Av
 
 
 
-**Aluno: Isaias Abner Lima Saraiva**
+**Alunos: Isaias Abner Lima Saraiva /
+Sérgio Roberto Santos de Santana **
+
 
 ## Fonte dos Dados e Estrutura dos Dados
 
